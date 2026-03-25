@@ -100,6 +100,8 @@
   .voice-btn:active{transform:scale(.95)}
   .voice-btn.recording{background:var(--coral);color:var(--white);animation:pulse 1s infinite}
   .voice-btn .voice-label{font-size:14px;font-weight:700}
+  .voice-btn .rec-dot{display:none;width:10px;height:10px;border-radius:50%;background:#fff;animation:blink .8s infinite}
+  .voice-btn.recording .rec-dot{display:inline-block}
   @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.03)}}
   .save-btn{flex:1;border:none;border-radius:16px;padding:14px;font-size:16px;font-weight:800;cursor:pointer;font-family:inherit;background:var(--yellow);color:var(--navy);box-shadow:0 3px 0 #D4B200;transition:transform .1s}
   .save-btn:active{transform:translateY(2px);box-shadow:0 1px 0 #D4B200}
@@ -158,7 +160,7 @@
     </div>
     <div class="feedback" id="spellFeedback"></div>
     <div class="action-row">
-      <button class="voice-btn" id="spellVoice" ontouchstart="voiceStart(event)" ontouchend="voiceStop(event)" onmousedown="voiceStart(event)" onmouseup="voiceStop(event)"><span>🎤</span><span class="voice-label">按住说</span></button>
+      <button class="voice-btn" id="spellVoice" onclick="voiceToggle(this)"><span>🎤</span><span class="voice-label">点击说英文</span></button>
       <button class="save-btn" onclick="saveToBook()">记住了！</button>
     </div>
     <div class="t9-wrap" id="spellT9"></div>
@@ -177,7 +179,7 @@
     </div>
     <div class="feedback" id="quizFeedback"></div>
     <div class="action-row">
-      <button class="voice-btn" id="quizVoice" ontouchstart="voiceStart(event)" ontouchend="voiceStop(event)" onmousedown="voiceStart(event)" onmouseup="voiceStop(event)"><span>🎤</span><span class="voice-label">按住说</span></button>
+      <button class="voice-btn" id="quizVoice" onclick="voiceToggle(this)"><span>🎤</span><span class="voice-label">点击说英文</span></button>
       <button class="hint-btn" onclick="showQuizHint()">提示</button>
       <button class="check-btn" onclick="checkQuiz()">检查 ✓</button>
     </div>
@@ -330,78 +332,94 @@ function renderDisplay(){
 }
 
 // ==================== VOICE ====================
-function voiceStart(e){
-  e.preventDefault();
-  if(isRecording)return;
+let voiceRec=null, voiceBtn=null, recTimer=null, recSec=0;
+const hasWebSpeech=('webkitSpeechRecognition' in window)||('SpeechRecognition' in window);
+
+function voiceToggle(btn){
+  voiceBtn=btn;
+  if(isRecording){voiceStopAll();return;}
   isRecording=true;
-  const btn=e.currentTarget;
+  const fbId=activeTarget==='spell'?'spellFeedback':'quizFeedback';
   btn.classList.add('recording');
-  btn.querySelector('.voice-label').textContent='松开识别';
+  recSec=0;
+  btn.querySelector('.voice-label').textContent='正在听... 0s';
+  recTimer=setInterval(()=>{recSec++;btn.querySelector('.voice-label').textContent='正在听... '+recSec+'s';if(recSec>=10)voiceStopAll();},1000);
+
+  if(hasWebSpeech){
+    // Prefer Web Speech API: real-time, low latency, stable
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    voiceRec=new SR();voiceRec.lang='en-US';voiceRec.continuous=false;voiceRec.interimResults=true;
+    voiceRec.onresult=e=>{
+      let final='',interim='';
+      for(let i=0;i<e.results.length;i++){
+        if(e.results[i].isFinal)final+=e.results[i][0].transcript;
+        else interim+=e.results[i][0].transcript;
+      }
+      const text=(final||interim).toLowerCase().trim();
+      if(text){confirmT9();inputText=text;renderDisplay();showFB(fbId,'');}
+    };
+    voiceRec.onend=()=>{voiceResetBtn();};
+    voiceRec.onerror=e=>{
+      voiceResetBtn();
+      if(e.error==='not-allowed')showFB(fbId,'需要麦克风权限','info');
+      else if(e.error!=='aborted')startDashScopeRecording(fbId);
+    };
+    voiceRec.start();
+    showFB(fbId,'说英文单词...','info');
+  }else{
+    startDashScopeRecording(fbId);
+  }
+}
+
+function startDashScopeRecording(fbId){
   audioChunks=[];
   navigator.mediaDevices.getUserMedia({audio:{sampleRate:16000,channelCount:1}}).then(stream=>{
     mediaRecorder=new MediaRecorder(stream);
     mediaRecorder.ondataavailable=ev=>{audioChunks.push(ev.data);};
     mediaRecorder.onstop=()=>{
       stream.getTracks().forEach(t=>t.stop());
-      const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType});
-      processAudio(blob);
+      if(audioChunks.length>0){
+        const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType});
+        processDashScope(blob,fbId);
+      }
     };
     mediaRecorder.start();
-  }).catch(err=>{
-    isRecording=false;btn.classList.remove('recording');
-    btn.querySelector('.voice-label').textContent='按住说';
-    showFB(activeTarget==='spell'?'spellFeedback':'quizFeedback','需要麦克风权限','info');
-  });
-}
-function voiceStop(e){
-  e.preventDefault();
-  if(!isRecording)return;
-  isRecording=false;
-  const btn=e.currentTarget;
-  btn.classList.remove('recording');
-  btn.querySelector('.voice-label').textContent='按住说';
-  if(mediaRecorder&&mediaRecorder.state==='recording')mediaRecorder.stop();
+    showFB(fbId,'说完后点击停止','info');
+  }).catch(()=>{voiceResetBtn();showFB(fbId,'需要麦克风权限','info');});
 }
 
-async function processAudio(blob){
-  const fbId=activeTarget==='spell'?'spellFeedback':'quizFeedback';
+function voiceStopAll(){
+  clearInterval(recTimer);
+  isRecording=false;
+  if(voiceRec){try{voiceRec.stop();}catch(e){}voiceRec=null;}
+  if(mediaRecorder&&mediaRecorder.state==='recording'){mediaRecorder.stop();}
+  voiceResetBtn();
+}
+function voiceResetBtn(){
+  clearInterval(recTimer);isRecording=false;
+  document.querySelectorAll('.voice-btn').forEach(b=>{b.classList.remove('recording');b.querySelector('.voice-label').textContent='点击说英文';});
+}
+
+async function processDashScope(blob,fbId){
   showFB(fbId,'识别中...','info');
   try{
-    // Try DashScope proxy first
     const reader=new FileReader();
-    const base64=await new Promise((resolve,reject)=>{
-      reader.onloadend=()=>resolve(reader.result.split(',')[1]);
-      reader.onerror=reject;
-      reader.readAsDataURL(blob);
-    });
-    const res=await fetch('/api/asr',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:base64,format:'webm'})});
+    const base64=await new Promise((resolve,reject)=>{reader.onloadend=()=>resolve(reader.result.split(',')[1]);reader.onerror=reject;reader.readAsDataURL(blob);});
+    const fmt=blob.type.includes('mp4')?'mp4':blob.type.includes('wav')?'wav':'webm';
+    const res=await fetch('/api/asr',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:base64,format:fmt})});
     if(res.ok){
       const data=await res.json();
       const text=extractASRText(data);
       if(text){confirmT9();inputText=text.toLowerCase().replace(/[^a-z\s.,!?']/g,'');renderDisplay();showFB(fbId,'');return;}
     }
-    // Fallback to Web Speech API
-    fallbackWebSpeech(fbId);
-  }catch(e){
-    fallbackWebSpeech(fbId);
-  }
+    showFB(fbId,'没听清，再试一次','wrong');
+  }catch(e){showFB(fbId,'识别失败，请重试','wrong');}
 }
 function extractASRText(data){
-  if(data.output&&data.output.sentence&&data.output.sentence.text)return data.output.sentence.text;
+  if(data.text)return data.text;
+  if(data.choices&&data.choices[0]&&data.choices[0].message)return data.choices[0].message.content;
   if(data.output&&data.output.text)return data.output.text;
-  if(data.output&&data.output.sentences){const s=data.output.sentences;if(s.length)return s.map(x=>x.text).join(' ');}
   return null;
-}
-function fallbackWebSpeech(fbId){
-  if(!('webkitSpeechRecognition' in window)&&!('SpeechRecognition' in window)){showFB(fbId,'语音暂不可用','wrong');return;}
-  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-  const rec=new SR();rec.lang='en-US';rec.continuous=false;rec.interimResults=false;
-  rec.onresult=e=>{
-    const text=e.results[0][0].transcript;
-    confirmT9();inputText=text.toLowerCase();renderDisplay();showFB(fbId,'');
-  };
-  rec.onerror=()=>showFB(fbId,'没听清，再说一次','wrong');
-  rec.start();showFB(fbId,'请说英文...','info');
 }
 
 // ==================== SPELL MODE ====================
